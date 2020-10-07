@@ -46,8 +46,8 @@ web-sys = { version = "0.3.35", features = [ "AudioContext", "AudioContextOption
 
 [target.'cfg(target_os = "android")'.dependencies]
 aaudio-sys = { version = "0.1", path = "aaudio-sys" }
-ndk = "0.1"
-ndk-glue = "0.1"
+ndk = "0.2.0"
+ndk-glue = "0.2.0"
 jni = "0.17"
 num-traits = "0.2.6"
 num-derive = "0.3"
