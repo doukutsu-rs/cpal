@@ -77,11 +77,11 @@ impl HostTrait for Host {
     }
 
     fn default_output_device(&self) -> Option<Self::Device> {
-        if let Ok(devices) = oboe::AudioDeviceInfo::request(oboe::AudioDeviceDirection::Output) {
-            devices.into_iter().map(|d| Device(Some(d))).next()
-        } else {
-            Some(Device(None))
-        }
+        //if let Ok(devices) = oboe::AudioDeviceInfo::request(oboe::AudioDeviceDirection::Output) {
+        //    devices.into_iter().map(|d| Device(Some(d))).next()
+        //} else {
+        Some(Device(None))
+        //}
     }
 }
 
