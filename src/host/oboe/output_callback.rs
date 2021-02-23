@@ -33,7 +33,7 @@ impl<I, C> CpalOutputCallback<I, C> {
 
     fn make_callback_info(
         &self,
-        audio_stream: &mut dyn oboe::AudioOutputStream,
+        audio_stream: &mut dyn oboe::AudioOutputStreamSafe,
     ) -> OutputCallbackInfo {
         OutputCallbackInfo {
             timestamp: OutputStreamTimestamp {
@@ -52,7 +52,7 @@ where
 
     fn on_audio_ready(
         &mut self,
-        audio_stream: &mut dyn oboe::AudioOutputStream,
+        audio_stream: &mut dyn oboe::AudioOutputStreamSafe,
         audio_data: &mut [<<Self as oboe::AudioOutputCallback>::FrameType as oboe::IsFrameType>::Type],
     ) -> oboe::DataCallbackResult {
         let cb_info = self.make_callback_info(audio_stream);
@@ -76,7 +76,7 @@ where
 
     fn on_error_before_close(
         &mut self,
-        _audio_stream: &mut dyn oboe::AudioOutputStream,
+        _audio_stream: &mut dyn oboe::AudioOutputStreamSafe,
         error: oboe::Error,
     ) {
         (self.error_cb)(StreamError::from(error))
@@ -84,7 +84,7 @@ where
 
     fn on_error_after_close(
         &mut self,
-        _audio_stream: &mut dyn oboe::AudioOutputStream,
+        _audio_stream: &mut dyn oboe::AudioOutputStreamSafe,
         error: oboe::Error,
     ) {
         (self.error_cb)(StreamError::from(error))

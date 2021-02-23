@@ -484,7 +484,7 @@ impl StreamTrait for Stream {
     fn pause(&self) -> Result<(), PauseStreamError> {
         self.0
             .borrow_mut()
-            .request_pause()
+            .request_stop()
             .map_err(PauseStreamError::from)
     }
 }
