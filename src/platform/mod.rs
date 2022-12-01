@@ -564,6 +564,24 @@ mod platform_impl {
     }
 }
 
+#[cfg(target_os = "horizon")]
+mod platform_impl {
+    pub use crate::host::horizon::{
+        Device as HorizonDevice, Devices as HorizonDevices, Host as HorizonHost, Stream as HorizonStream,
+        SupportedInputConfigs as HorizonSupportedInputConfigs,
+        SupportedOutputConfigs as HorizonSupportedOutputConfigs,
+    };
+
+    impl_platform_host!(Horizon horizon "Horizon");
+
+    /// The default host for the current compilation target platform.
+    pub fn default_host() -> Host {
+        HorizonHost::new()
+            .expect("the default host should always be available")
+            .into()
+    }
+}
+
 #[cfg(not(any(
     windows,
     target_os = "linux",
@@ -573,6 +591,7 @@ mod platform_impl {
     target_os = "ios",
     target_os = "emscripten",
     target_os = "android",
+    target_os = "horizon",
     all(target_arch = "wasm32", feature = "wasm-bindgen"),
 )))]
 mod platform_impl {
