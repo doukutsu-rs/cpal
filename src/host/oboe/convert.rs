@@ -4,8 +4,8 @@ use std::time::Duration;
 extern crate oboe;
 
 use crate::{
-    BackendSpecificError, BuildStreamError, PauseStreamError, PlayStreamError, SampleRate,
-    StreamError, StreamInstant,
+    BackendSpecificError, BuildStreamError, PauseStreamError, PlayStreamError, StreamError,
+    StreamInstant,
 };
 
 pub fn to_stream_instant(duration: Duration) -> StreamInstant {

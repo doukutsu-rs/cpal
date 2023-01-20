@@ -2,28 +2,29 @@
 //!
 //! Here are some concepts cpal exposes:
 //!
-//! - A [**Host**](./struct.Host.html) provides access to the available audio devices on the system.
+//! - A [`Host`] provides access to the available audio devices on the system.
 //!   Some platforms have more than one host available, but every platform supported by CPAL has at
-//!   least one [**DefaultHost**](./struct.Host.html) that is guaranteed to be available.
-//! - A [**Device**](./struct.Device.html) is an audio device that may have any number of input and
+//!   least one [default_host] that is guaranteed to be available.
+//! - A [`Device`] is an audio device that may have any number of input and
 //!   output streams.
-//! - A [**Stream**](./trait.Stream.html) is an open flow of audio data. Input streams allow you to
+//! - A [`Stream`] is an open flow of audio data. Input streams allow you to
 //!   receive audio data, output streams allow you to play audio data. You must choose which
-//!   **Device** will run your stream before you can create one. Often, a default device can be
-//!   retrieved via the **Host**.
+//!   [Device] will run your stream before you can create one. Often, a default device can be
+//!   retrieved via the [Host].
 //!
-//! The first step is to initialise the `Host`:
+//! The first step is to initialise the [`Host`]:
 //!
 //! ```
 //! use cpal::traits::HostTrait;
 //! let host = cpal::default_host();
 //! ```
 //!
-//! Then choose an available `Device`. The easiest way is to use the default input or output
-//! `Device` via the `default_input_device()` or `default_output_device()` functions. Alternatively
-//! you can enumerate all the available devices with the `devices()` function. Beware that the
-//! `default_*_device()` functions return an `Option` in case no device is available for that
-//! stream type on the system.
+//! Then choose an available [`Device`]. The easiest way is to use the default input or output
+//! `Device` via the [`default_input_device()`] or [`default_output_device()`] methods on `host`.
+//!
+//! Alternatively, you can enumerate all the available devices with the [`devices()`] method.
+//! Beware that the `default_*_device()` functions return an `Option<Device>` in case no device
+//! is available for that stream type on the system.
 //!
 //! ```no_run
 //! # use cpal::traits::HostTrait;
@@ -32,15 +33,18 @@
 //! ```
 //!
 //! Before we can create a stream, we must decide what the configuration of the audio stream is
-//! going to be. You can query all the supported configurations with the
-//! `supported_input_configs()` and `supported_output_configs()` methods. These produce a list of
-//! `SupportedStreamConfigRange` structs which can later be turned into actual
-//! `SupportedStreamConfig` structs. If you don't want to query the list of configs, you can also
-//! build your own `StreamConfig` manually, but doing so could lead to an error when building the
-//! stream if the config is not supported by the device.
+//! going to be.    
+//! You can query all the supported configurations with the
+//! [`supported_input_configs()`] and [`supported_output_configs()`] methods.
+//! These produce a list of [`SupportedStreamConfigRange`] structs which can later be turned into
+//! actual [`SupportedStreamConfig`] structs.
 //!
-//! > **Note**: the `supported_input/output_configs()` methods could return an error for example if
-//! > the device has been disconnected.
+//! If you don't want to query the list of configs,
+//! you can also build your own [`StreamConfig`] manually, but doing so could lead to an error when
+//! building the stream if the config is not supported by the device.
+//!
+//! > **Note**: the `supported_input/output_configs()` methods
+//! > could return an error for example if the device has been disconnected.
 //!
 //! ```no_run
 //! use cpal::traits::{DeviceTrait, HostTrait};
@@ -69,12 +73,13 @@
 //!     move |err| {
 //!         // react to errors here.
 //!     },
+//!     None // None=blocking, Some(Duration)=timeout
 //! );
 //! ```
 //!
 //! While the stream is running, the selected audio device will periodically call the data callback
-//! that was passed to the function. The callback is passed an instance of either `&Data` or
-//! `&mut Data` depending on whether the stream is an input stream or output stream respectively.
+//! that was passed to the function. The callback is passed an instance of either [`&Data` or
+//! `&mut Data`](Data) depending on whether the stream is an input stream or output stream respectively.
 //!
 //! > **Note**: Creating and running a stream will *not* block the thread. On modern platforms, the
 //! > given callback is called by a dedicated, high-priority thread responsible for delivering
@@ -82,13 +87,13 @@
 //! > provide a blocking API (e.g. ALSA), CPAL will create a thread in order to consistently
 //! > provide non-blocking behaviour (currently this is a thread per stream, but this may change to
 //! > use a single thread for all streams). *If this is an issue for your platform or design,
-//! > please share your issue and use-case with the CPAL team on the github issue tracker for
+//! > please share your issue and use-case with the CPAL team on the GitHub issue tracker for
 //! > consideration.*
 //!
 //! In this example, we simply fill the given output buffer with silence.
 //!
 //! ```no_run
-//! use cpal::{Data, Sample, SampleFormat};
+//! use cpal::{Data, Sample, SampleFormat, FromSample};
 //! use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 //! # let host = cpal::default_host();
 //! # let device = host.default_output_device().unwrap();
@@ -97,20 +102,21 @@
 //! let sample_format = supported_config.sample_format();
 //! let config = supported_config.into();
 //! let stream = match sample_format {
-//!     SampleFormat::F32 => device.build_output_stream(&config, write_silence::<f32>, err_fn),
-//!     SampleFormat::I16 => device.build_output_stream(&config, write_silence::<i16>, err_fn),
-//!     SampleFormat::U16 => device.build_output_stream(&config, write_silence::<u16>, err_fn),
+//!     SampleFormat::F32 => device.build_output_stream(&config, write_silence::<f32>, err_fn, None),
+//!     SampleFormat::I16 => device.build_output_stream(&config, write_silence::<i16>, err_fn, None),
+//!     SampleFormat::U16 => device.build_output_stream(&config, write_silence::<u16>, err_fn, None),
+//!     sample_format => panic!("Unsupported sample format '{sample_format}'")
 //! }.unwrap();
 //!
 //! fn write_silence<T: Sample>(data: &mut [T], _: &cpal::OutputCallbackInfo) {
 //!     for sample in data.iter_mut() {
-//!         *sample = Sample::from(&0.0);
+//!         *sample = Sample::EQUILIBRIUM;
 //!     }
 //! }
 //! ```
 //!
 //! Not all platforms automatically run the stream upon creation. To ensure the stream has started,
-//! we can use `Stream::play`.
+//! we can use [`Stream::play`](traits::StreamTrait::play).
 //!
 //! ```no_run
 //! # use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -121,7 +127,7 @@
 //! # let config = supported_config.into();
 //! # let data_fn = move |_data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {};
 //! # let err_fn = move |_err| {};
-//! # let stream = device.build_output_stream_raw(&config, sample_format, data_fn, err_fn).unwrap();
+//! # let stream = device.build_output_stream_raw(&config, sample_format, data_fn, err_fn, None).unwrap();
 //! stream.play().unwrap();
 //! ```
 //!
@@ -137,29 +143,39 @@
 //! # let config = supported_config.into();
 //! # let data_fn = move |_data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| {};
 //! # let err_fn = move |_err| {};
-//! # let stream = device.build_output_stream_raw(&config, sample_format, data_fn, err_fn).unwrap();
+//! # let stream = device.build_output_stream_raw(&config, sample_format, data_fn, err_fn, None).unwrap();
 //! stream.pause().unwrap();
 //! ```
+//!
+//! [`default_input_device()`]: traits::HostTrait::default_input_device
+//! [`default_output_device()`]: traits::HostTrait::default_output_device
+//! [`devices()`]: traits::HostTrait::devices
+//! [`supported_input_configs()`]: traits::DeviceTrait::supported_input_configs
+//! [`supported_output_configs()`]: traits::DeviceTrait::supported_output_configs
 
-#![recursion_limit = "512"]
+#![recursion_limit = "2048"]
 
-#[cfg(target_os = "windows")]
-#[macro_use]
-extern crate lazy_static;
 // Extern crate declarations with `#[macro_use]` must unfortunately be at crate root.
 #[cfg(target_os = "emscripten")]
 #[macro_use]
-extern crate stdweb;
+extern crate wasm_bindgen;
+#[cfg(target_os = "emscripten")]
+extern crate js_sys;
 extern crate thiserror;
+#[cfg(target_os = "emscripten")]
+extern crate web_sys;
 
 pub use error::*;
 pub use platform::{
     available_hosts, default_host, host_from_id, Device, Devices, Host, HostId, Stream,
     SupportedInputConfigs, SupportedOutputConfigs, ALL_HOSTS,
 };
-pub use samples_formats::{Sample, SampleFormat};
+pub use samples_formats::{FromSample, Sample, SampleFormat, SizedSample, I24, I48, U24, U48};
 use std::convert::TryInto;
+use std::ops::{Div, Mul};
 use std::time::Duration;
+#[cfg(target_os = "emscripten")]
+use wasm_bindgen::prelude::*;
 
 mod error;
 mod host;
@@ -177,28 +193,71 @@ pub type OutputDevices<I> = std::iter::Filter<I, fn(&<I as Iterator>::Item) -> b
 pub type ChannelCount = u16;
 
 /// The number of samples processed per second for a single channel of audio.
+#[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SampleRate(pub u32);
+
+impl<T> Mul<T> for SampleRate
+where
+    u32: Mul<T, Output = u32>,
+{
+    type Output = Self;
+    fn mul(self, rhs: T) -> Self {
+        SampleRate(self.0 * rhs)
+    }
+}
+
+impl<T> Div<T> for SampleRate
+where
+    u32: Div<T, Output = u32>,
+{
+    type Output = Self;
+    fn div(self, rhs: T) -> Self {
+        SampleRate(self.0 / rhs)
+    }
+}
 
 /// The desired number of frames for the hardware buffer.
 pub type FrameCount = u32;
 
 /// The buffer size used by the device.
 ///
-/// Default is used when no specific buffer size is set and uses the default
+/// [`Default`] is used when no specific buffer size is set and uses the default
 /// behavior of the given host. Note, the default buffer size may be surprisingly
-/// large, leading to latency issues. If low latency is desired, Fixed(BufferSize)
-/// should be used in accordance with the SupportedBufferSize range produced by
-/// the SupportedStreamConfig API.  
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// large, leading to latency issues. If low latency is desired, [`Fixed(FrameCount)`]
+/// should be used in accordance with the [`SupportedBufferSize`] range produced by
+/// the [`SupportedStreamConfig`] API.  
+///
+/// [`Default`]: BufferSize::Default
+/// [`Fixed(FrameCount)`]: BufferSize::Fixed
+/// [`SupportedStreamConfig`]: SupportedStreamConfig::buffer_size
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BufferSize {
     Default,
     Fixed(FrameCount),
 }
 
+#[cfg(target_os = "emscripten")]
+impl wasm_bindgen::describe::WasmDescribe for BufferSize {
+    fn describe() {}
+}
+
+#[cfg(target_os = "emscripten")]
+impl wasm_bindgen::convert::IntoWasmAbi for BufferSize {
+    type Abi = wasm_bindgen::convert::WasmOption<u32>;
+    fn into_abi(self) -> Self::Abi {
+        match self {
+            Self::Default => None,
+            Self::Fixed(fc) => Some(fc),
+        }
+        .into_abi()
+    }
+}
+
 /// The set of parameters used to describe how to open a stream.
 ///
 /// The sample format is omitted in favour of using a sample type.
+#[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StreamConfig {
     pub channels: ChannelCount,
@@ -219,7 +278,7 @@ pub enum SupportedBufferSize {
 }
 
 /// Describes a range of supported stream configurations, retrieved via the
-/// `Device::supported_input/output_configs` method.
+/// [`Device::supported_input/output_configs`](traits::DeviceTrait#required-methods) method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupportedStreamConfigRange {
     pub(crate) channels: ChannelCount,
@@ -234,7 +293,8 @@ pub struct SupportedStreamConfigRange {
 }
 
 /// Describes a single supported stream configuration, retrieved via either a
-/// `SupportedStreamConfigRange` instance or one of the `Device::default_input/output_config` methods.
+/// [`SupportedStreamConfigRange`] instance or one of the
+/// [`Device::default_input/output_config`](traits::DeviceTrait#required-methods) methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupportedStreamConfig {
     channels: ChannelCount,
@@ -247,6 +307,7 @@ pub struct SupportedStreamConfig {
 ///
 /// Raw input stream callbacks receive `&Data`, while raw output stream callbacks expect `&mut
 /// Data`.
+#[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 #[derive(Debug)]
 pub struct Data {
     data: *mut (),
@@ -260,7 +321,7 @@ pub struct Data {
 /// 2. The same time source used to generate timestamps for a stream's underlying audio data
 ///    callback.
 ///
-/// **StreamInstant** represents a duration since some unspecified origin occurring either before
+/// `StreamInstant` represents a duration since some unspecified origin occurring either before
 /// or equal to the moment the stream from which it was created begins.
 ///
 /// ## Host `StreamInstant` Sources
@@ -301,18 +362,33 @@ pub struct OutputStreamTimestamp {
 }
 
 /// Information relevant to a single call to the user's input stream data callback.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputCallbackInfo {
     timestamp: InputStreamTimestamp,
 }
 
 /// Information relevant to a single call to the user's output stream data callback.
-#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(target_os = "emscripten", wasm_bindgen)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputCallbackInfo {
     timestamp: OutputStreamTimestamp,
 }
 
 impl SupportedStreamConfig {
+    pub fn new(
+        channels: ChannelCount,
+        sample_rate: SampleRate,
+        buffer_size: SupportedBufferSize,
+        sample_format: SampleFormat,
+    ) -> Self {
+        Self {
+            channels,
+            sample_rate,
+            buffer_size,
+            sample_format,
+        }
+    }
+
     pub fn channels(&self) -> ChannelCount {
         self.channels
     }
@@ -366,7 +442,7 @@ impl StreamInstant {
     /// Returns the instant in time one `duration` ago.
     ///
     /// Returns `None` if the resulting instant would underflow. As a result, it is important to
-    /// consider that on some platforms the `StreamInstant` may begin at `0` from the moment the
+    /// consider that on some platforms the [`StreamInstant`] may begin at `0` from the moment the
     /// source stream is created.
     pub fn sub(&self, duration: Duration) -> Option<Self> {
         self.as_nanos()
@@ -388,11 +464,11 @@ impl StreamInstant {
     #[allow(dead_code)]
     fn from_nanos_i128(nanos: i128) -> Option<Self> {
         let secs = nanos / 1_000_000_000;
-        if secs > std::i64::MAX as i128 || secs < std::i64::MIN as i128 {
+        if secs > i64::MAX as i128 || secs < i64::MIN as i128 {
             None
         } else {
             let subsec_nanos = nanos - secs * 1_000_000_000;
-            debug_assert!(subsec_nanos < std::u32::MAX as i128);
+            debug_assert!(subsec_nanos < u32::MAX as i128);
             Some(Self::new(secs as i64, subsec_nanos as u32))
         }
     }
@@ -423,6 +499,7 @@ impl OutputCallbackInfo {
     }
 }
 
+#[allow(clippy::len_without_is_empty)]
 impl Data {
     // Internal constructor for host implementations to use.
     //
@@ -453,24 +530,24 @@ impl Data {
     /// The full length of the buffer in samples.
     ///
     /// The returned length is the same length as the slice of type `T` that would be returned via
-    /// `as_slice` given a sample type that matches the inner sample format.
+    /// [`as_slice`](Self::as_slice) given a sample type that matches the inner sample format.
     pub fn len(&self) -> usize {
         self.len
     }
 
     /// The raw slice of memory representing the underlying audio data as a slice of bytes.
     ///
-    /// It is up to the user to interpret the slice of memory based on `Data::sample_format`.
+    /// It is up to the user to interpret the slice of memory based on [`Data::sample_format`].
     pub fn bytes(&self) -> &[u8] {
         let len = self.len * self.sample_format.sample_size();
-        // The safety of this block relies on correct construction of the `Data` instance. See
-        // the unsafe `from_parts` constructor for these requirements.
+        // The safety of this block relies on correct construction of the `Data` instance.
+        // See the unsafe `from_parts` constructor for these requirements.
         unsafe { std::slice::from_raw_parts(self.data as *const u8, len) }
     }
 
     /// The raw slice of memory representing the underlying audio data as a slice of bytes.
     ///
-    /// It is up to the user to interpret the slice of memory based on `Data::sample_format`.
+    /// It is up to the user to interpret the slice of memory based on [`Data::sample_format`].
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         let len = self.len * self.sample_format.sample_size();
         // The safety of this block relies on correct construction of the `Data` instance. See
@@ -483,7 +560,7 @@ impl Data {
     /// Returns `None` if the sample type does not match the expected sample format.
     pub fn as_slice<T>(&self) -> Option<&[T]>
     where
-        T: Sample,
+        T: SizedSample,
     {
         if T::FORMAT == self.sample_format {
             // The safety of this block relies on correct construction of the `Data` instance. See
@@ -499,7 +576,7 @@ impl Data {
     /// Returns `None` if the sample type does not match the expected sample format.
     pub fn as_slice_mut<T>(&mut self) -> Option<&mut [T]>
     where
-        T: Sample,
+        T: SizedSample,
     {
         if T::FORMAT == self.sample_format {
             // The safety of this block relies on correct construction of the `Data` instance. See
@@ -517,6 +594,22 @@ impl Data {
 }
 
 impl SupportedStreamConfigRange {
+    pub fn new(
+        channels: ChannelCount,
+        min_sample_rate: SampleRate,
+        max_sample_rate: SampleRate,
+        buffer_size: SupportedBufferSize,
+        sample_format: SampleFormat,
+    ) -> Self {
+        Self {
+            channels,
+            min_sample_rate,
+            max_sample_rate,
+            buffer_size,
+            sample_format,
+        }
+    }
+
     pub fn channels(&self) -> ChannelCount {
         self.channels
     }
@@ -537,10 +630,12 @@ impl SupportedStreamConfigRange {
         self.sample_format
     }
 
-    /// Retrieve a `SupportedStreamConfig` with the given sample rate and buffer size.
+    /// Retrieve a [`SupportedStreamConfig`] with the given sample rate and buffer size.
     ///
-    /// **panic!**s if the given `sample_rate` is outside the range specified within this
-    /// `SupportedStreamConfigRange` instance.
+    /// # Panics
+    ///
+    /// Panics if the given `sample_rate` is outside the range specified within this
+    /// [`SupportedStreamConfigRange`] instance.
     pub fn with_sample_rate(self, sample_rate: SampleRate) -> SupportedStreamConfig {
         assert!(self.min_sample_rate <= sample_rate && sample_rate <= self.max_sample_rate);
         SupportedStreamConfig {
@@ -551,7 +646,7 @@ impl SupportedStreamConfigRange {
         }
     }
 
-    /// Turns this `SupportedStreamConfigRange` into a `SupportedStreamConfig` corresponding to the maximum samples rate.
+    /// Turns this [`SupportedStreamConfigRange`] into a [`SupportedStreamConfig`] corresponding to the maximum samples rate.
     #[inline]
     pub fn with_max_sample_rate(self) -> SupportedStreamConfig {
         SupportedStreamConfig {
@@ -562,7 +657,7 @@ impl SupportedStreamConfigRange {
         }
     }
 
-    /// A comparison function which compares two `SupportedStreamConfigRange`s in terms of their priority of
+    /// A comparison function which compares two [`SupportedStreamConfigRange`]s in terms of their priority of
     /// use as a default stream format.
     ///
     /// Some backends do not provide a default stream format for their audio devices. In these
@@ -713,7 +808,7 @@ impl From<SupportedStreamConfig> for StreamConfig {
 //
 // If a rate you desire is missing from this list, feel free to add it!
 #[cfg(target_os = "windows")]
-const COMMON_SAMPLE_RATES: &'static [SampleRate] = &[
+const COMMON_SAMPLE_RATES: &[SampleRate] = &[
     SampleRate(5512),
     SampleRate(8000),
     SampleRate(11025),
@@ -733,8 +828,8 @@ const COMMON_SAMPLE_RATES: &'static [SampleRate] = &[
 fn test_stream_instant() {
     let a = StreamInstant::new(2, 0);
     let b = StreamInstant::new(-2, 0);
-    let min = StreamInstant::new(std::i64::MIN, 0);
-    let max = StreamInstant::new(std::i64::MAX, 0);
+    let min = StreamInstant::new(i64::MIN, 0);
+    let max = StreamInstant::new(i64::MAX, 0);
     assert_eq!(
         a.sub(Duration::from_secs(1)),
         Some(StreamInstant::new(1, 0))

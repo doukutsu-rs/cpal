@@ -4,6 +4,7 @@ pub mod errors;
 
 use self::errors::{AsioError, AsioErrorWrapper, LoadDriverError};
 use num_traits::FromPrimitive;
+use once_cell::sync::Lazy;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_double, c_long, c_void};
@@ -248,17 +249,16 @@ struct BufferSizes {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CallbackId(usize);
 
-lazy_static! {
-    /// A global way to access all the callbacks.
-    ///
-    /// This is required because of how ASIO calls the `buffer_switch` function with no data
-    /// parameters.
-    ///
-    /// Options are used so that when a callback is removed we don't change the Vec indices.
-    ///
-    /// The indices are how we match a callback with a stream.
-    static ref BUFFER_CALLBACK: Mutex<Vec<(CallbackId, BufferCallback)>> = Mutex::new(Vec::new());
-}
+/// A global way to access all the callbacks.
+///
+/// This is required because of how ASIO calls the `buffer_switch` function with no data
+/// parameters.
+///
+/// Options are used so that when a callback is removed we don't change the Vec indices.
+///
+/// The indices are how we match a callback with a stream.
+static BUFFER_CALLBACK: Lazy<Mutex<Vec<(CallbackId, BufferCallback)>>> =
+    Lazy::new(|| Mutex::new(Vec::new()));
 
 impl Asio {
     /// Initialise the ASIO API.
@@ -440,7 +440,7 @@ impl Driver {
     /// This will destroy any already allocated buffers.
     ///
     /// If buffersize is None then the preferred buffer size from ASIO is used,
-    /// otherwise the desired buffersize is used if the requeted size is within
+    /// otherwise the desired buffersize is used if the requested size is within
     /// the range of accepted buffersizes for the device.
     fn create_buffers(
         &self,
@@ -842,7 +842,7 @@ fn asio_channel_info(channel: c_long, is_input: bool) -> Result<ai::ASIOChannelI
 /// If `is_input` is true, this will be queried on the input stream.
 fn stream_data_type(is_input: bool) -> Result<AsioSampleType, AsioError> {
     let channel_info = asio_channel_info(0, is_input)?;
-    Ok(FromPrimitive::from_i32(channel_info.type_).expect("unkown `ASIOSampletype` value"))
+    Ok(FromPrimitive::from_i32(channel_info.type_).expect("unknown `ASIOSampletype` value"))
 }
 
 /// ASIO uses null terminated c strings for driver names.

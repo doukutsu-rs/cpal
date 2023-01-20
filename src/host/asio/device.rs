@@ -4,18 +4,18 @@ pub type SupportedOutputConfigs = std::vec::IntoIter<SupportedStreamConfigRange>
 
 use super::parking_lot::Mutex;
 use super::sys;
+use crate::BackendSpecificError;
+use crate::DefaultStreamConfigError;
+use crate::DeviceNameError;
+use crate::DevicesError;
+use crate::SampleFormat;
+use crate::SampleRate;
+use crate::SupportedBufferSize;
+use crate::SupportedStreamConfig;
+use crate::SupportedStreamConfigRange;
+use crate::SupportedStreamConfigsError;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use BackendSpecificError;
-use DefaultStreamConfigError;
-use DeviceNameError;
-use DevicesError;
-use SampleFormat;
-use SampleRate;
-use SupportedBufferSize;
-use SupportedStreamConfig;
-use SupportedStreamConfigRange;
-use SupportedStreamConfigsError;
 
 /// A ASIO Device
 pub struct Device {
@@ -23,7 +23,7 @@ pub struct Device {
     pub driver: Arc<sys::Driver>,
 
     // Input and/or Output stream.
-    // An driver can only have one of each.
+    // A driver can only have one of each.
     // They need to be created at the same time.
     pub asio_streams: Arc<Mutex<sys::AsioStreams>>,
 }
@@ -61,14 +61,14 @@ impl Device {
     ) -> Result<SupportedInputConfigs, SupportedStreamConfigsError> {
         // Retrieve the default config for the total supported channels and supported sample
         // format.
-        let mut f = match self.default_input_config() {
+        let f = match self.default_input_config() {
             Err(_) => return Err(SupportedStreamConfigsError::DeviceNotAvailable),
             Ok(f) => f,
         };
 
         // Collect a config for every combination of supported sample rate and number of channels.
         let mut supported_configs = vec![];
-        for &rate in ::COMMON_SAMPLE_RATES {
+        for &rate in crate::COMMON_SAMPLE_RATES {
             if !self
                 .driver
                 .can_sample_rate(rate.0.into())
@@ -98,14 +98,14 @@ impl Device {
     ) -> Result<SupportedOutputConfigs, SupportedStreamConfigsError> {
         // Retrieve the default config for the total supported channels and supported sample
         // format.
-        let mut f = match self.default_output_config() {
+        let f = match self.default_output_config() {
             Err(_) => return Err(SupportedStreamConfigsError::DeviceNotAvailable),
             Ok(f) => f,
         };
 
         // Collect a config for every combination of supported sample rate and number of channels.
         let mut supported_configs = vec![];
-        for &rate in ::COMMON_SAMPLE_RATES {
+        for &rate in crate::COMMON_SAMPLE_RATES {
             if !self
                 .driver
                 .can_sample_rate(rate.0.into())
@@ -201,10 +201,6 @@ impl Iterator for Devices {
             }
         }
     }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        unimplemented!()
-    }
 }
 
 pub(crate) fn convert_data_type(ty: &sys::AsioSampleType) -> Option<SampleFormat> {
@@ -213,13 +209,8 @@ pub(crate) fn convert_data_type(ty: &sys::AsioSampleType) -> Option<SampleFormat
         sys::AsioSampleType::ASIOSTInt16LSB => SampleFormat::I16,
         sys::AsioSampleType::ASIOSTFloat32MSB => SampleFormat::F32,
         sys::AsioSampleType::ASIOSTFloat32LSB => SampleFormat::F32,
-        // NOTE: While ASIO does not support these formats directly, the stream callback created by
-        // CPAL supports converting back and forth between the following. This is because many ASIO
-        // drivers only support `Int32` formats, while CPAL does not support this format at all. We
-        // allow for this implicit conversion temporarily until CPAL gets support for an `I32`
-        // format.
-        sys::AsioSampleType::ASIOSTInt32MSB => SampleFormat::I16,
-        sys::AsioSampleType::ASIOSTInt32LSB => SampleFormat::I16,
+        sys::AsioSampleType::ASIOSTInt32MSB => SampleFormat::I32,
+        sys::AsioSampleType::ASIOSTInt32LSB => SampleFormat::I32,
         _ => return None,
     };
     Some(fmt)

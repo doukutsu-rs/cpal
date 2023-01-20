@@ -1,7 +1,10 @@
 extern crate alsa;
 extern crate libc;
+extern crate parking_lot;
 
 use self::alsa::poll::Descriptors;
+use self::parking_lot::Mutex;
+use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::{
     BackendSpecificError, BufferSize, BuildStreamError, ChannelCount, Data,
     DefaultStreamConfigError, DeviceNameError, DevicesError, InputCallbackInfo, OutputCallbackInfo,
@@ -13,8 +16,8 @@ use std::cmp;
 use std::convert::TryInto;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::vec::IntoIter as VecIntoIter;
-use traits::{DeviceTrait, HostTrait, StreamTrait};
 
 pub use self::enumerate::{default_input_device, default_output_device, Devices};
 
@@ -23,7 +26,7 @@ pub type SupportedOutputConfigs = VecIntoIter<SupportedStreamConfigRange>;
 
 mod enumerate;
 
-/// The default linux, dragonfly and freebsd host type.
+/// The default linux, dragonfly, freebsd and netbsd host type.
 #[derive(Debug)]
 pub struct Host;
 
@@ -38,7 +41,7 @@ impl HostTrait for Host {
     type Device = Device;
 
     fn is_available() -> bool {
-        // Assume ALSA is always available on linux/dragonfly/freebsd.
+        // Assume ALSA is always available on linux/dragonfly/freebsd/netbsd.
         true
     }
 
@@ -90,6 +93,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -97,7 +101,12 @@ impl DeviceTrait for Device {
     {
         let stream_inner =
             self.build_stream_inner(conf, sample_format, alsa::Direction::Capture)?;
-        let stream = Stream::new_input(Arc::new(stream_inner), data_callback, error_callback);
+        let stream = Stream::new_input(
+            Arc::new(stream_inner),
+            data_callback,
+            error_callback,
+            timeout,
+        );
         Ok(stream)
     }
 
@@ -107,6 +116,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -114,7 +124,12 @@ impl DeviceTrait for Device {
     {
         let stream_inner =
             self.build_stream_inner(conf, sample_format, alsa::Direction::Playback)?;
-        let stream = Stream::new_output(Arc::new(stream_inner), data_callback, error_callback);
+        let stream = Stream::new_output(
+            Arc::new(stream_inner),
+            data_callback,
+            error_callback,
+            timeout,
+        );
         Ok(stream)
     }
 }
@@ -127,7 +142,7 @@ impl TriggerSender {
     fn wakeup(&self) {
         let buf = 1u64;
         let ret = unsafe { libc::write(self.0, &buf as *const u64 as *const _, 8) };
-        assert!(ret == 8);
+        assert_eq!(ret, 8);
     }
 }
 
@@ -163,8 +178,68 @@ impl Drop for TriggerReceiver {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Device(String);
+#[derive(Default)]
+struct DeviceHandles {
+    playback: Option<alsa::PCM>,
+    capture: Option<alsa::PCM>,
+}
+
+impl DeviceHandles {
+    /// Create `DeviceHandles` for `name` and try to open a handle for both
+    /// directions. Returns `Ok` if either direction is opened successfully.
+    fn open(name: &str) -> Result<Self, alsa::Error> {
+        let mut handles = Self::default();
+        let playback_err = handles.try_open(name, alsa::Direction::Playback).err();
+        let capture_err = handles.try_open(name, alsa::Direction::Capture).err();
+        if let Some(err) = capture_err.and(playback_err) {
+            Err(err)
+        } else {
+            Ok(handles)
+        }
+    }
+
+    /// Get a mutable reference to the `Option` for a specific `stream_type`.
+    /// If the `Option` is `None`, the `alsa::PCM` will be opened and placed in
+    /// the `Option` before returning. If `handle_mut()` returns `Ok` the contained
+    /// `Option` is guaranteed to be `Some(..)`.
+    fn try_open(
+        &mut self,
+        name: &str,
+        stream_type: alsa::Direction,
+    ) -> Result<&mut Option<alsa::PCM>, alsa::Error> {
+        let handle = match stream_type {
+            alsa::Direction::Playback => &mut self.playback,
+            alsa::Direction::Capture => &mut self.capture,
+        };
+
+        if handle.is_none() {
+            *handle = Some(alsa::pcm::PCM::new(name, stream_type, true)?);
+        }
+
+        Ok(handle)
+    }
+
+    /// Get a mutable reference to the `alsa::PCM` handle for a specific `stream_type`.
+    /// If the handle is not yet opened, it will be opened and stored in `self`.
+    fn get_mut(
+        &mut self,
+        name: &str,
+        stream_type: alsa::Direction,
+    ) -> Result<&mut alsa::PCM, alsa::Error> {
+        Ok(self.try_open(name, stream_type)?.as_mut().unwrap())
+    }
+
+    /// Take ownership of the `alsa::PCM` handle for a specific `stream_type`.
+    /// If the handle is not yet opened, it will be opened and returned.
+    fn take(&mut self, name: &str, stream_type: alsa::Direction) -> Result<alsa::PCM, alsa::Error> {
+        Ok(self.try_open(name, stream_type)?.take().unwrap())
+    }
+}
+
+pub struct Device {
+    name: String,
+    handles: Mutex<DeviceHandles>,
+}
 
 impl Device {
     fn build_stream_inner(
@@ -173,36 +248,33 @@ impl Device {
         sample_format: SampleFormat,
         stream_type: alsa::Direction,
     ) -> Result<StreamInner, BuildStreamError> {
-        let name = &self.0;
+        let handle_result = self
+            .handles
+            .lock()
+            .take(&self.name, stream_type)
+            .map_err(|e| (e, e.errno()));
 
-        let handle = match alsa::pcm::PCM::new(name, stream_type, true).map_err(|e| (e, e.errno()))
-        {
-            Err((_, Some(nix::errno::Errno::EBUSY))) => {
+        let handle = match handle_result {
+            Err((_, alsa::nix::errno::Errno::EBUSY)) => {
                 return Err(BuildStreamError::DeviceNotAvailable)
             }
-            Err((_, Some(nix::errno::Errno::EINVAL))) => {
+            Err((_, alsa::nix::errno::Errno::EINVAL)) => {
                 return Err(BuildStreamError::InvalidArgument)
             }
             Err((e, _)) => return Err(e.into()),
             Ok(handle) => handle,
         };
-        let can_pause = {
-            let hw_params = set_hw_params_from_format(&handle, conf, sample_format)?;
-            hw_params.can_pause()
-        };
-        let (_buffer_len, period_len) = set_sw_params_from_format(&handle, conf)?;
+        let can_pause = set_hw_params_from_format(&handle, conf, sample_format)?;
+        let period_len = set_sw_params_from_format(&handle, conf, stream_type)?;
 
         handle.prepare()?;
 
-        let num_descriptors = {
-            let num_descriptors = handle.count();
-            if num_descriptors == 0 {
-                let description = "poll descriptor count for stream was 0".to_string();
-                let err = BackendSpecificError { description };
-                return Err(err.into());
-            }
-            num_descriptors
-        };
+        let num_descriptors = handle.count();
+        if num_descriptors == 0 {
+            let description = "poll descriptor count for stream was 0".to_string();
+            let err = BackendSpecificError { description };
+            return Err(err.into());
+        }
 
         // Check to see if we can retrieve valid timestamps from the device.
         // Related: https://bugs.freedesktop.org/show_bug.cgi?id=88503
@@ -212,7 +284,9 @@ impl Device {
             _ => None,
         };
 
-        handle.start()?;
+        if let alsa::Direction::Capture = stream_type {
+            handle.start()?;
+        }
 
         let stream_inner = StreamInner {
             channel: handle,
@@ -229,33 +303,36 @@ impl Device {
 
     #[inline]
     fn name(&self) -> Result<String, DeviceNameError> {
-        Ok(self.0.clone())
+        Ok(self.name.clone())
     }
 
     fn supported_configs(
         &self,
         stream_t: alsa::Direction,
     ) -> Result<VecIntoIter<SupportedStreamConfigRange>, SupportedStreamConfigsError> {
-        let name = &self.0;
+        let mut guard = self.handles.lock();
+        let handle_result = guard
+            .get_mut(&self.name, stream_t)
+            .map_err(|e| (e, e.errno()));
 
-        let handle = match alsa::pcm::PCM::new(name, stream_t, true).map_err(|e| (e, e.errno())) {
-            Err((_, Some(nix::errno::Errno::ENOENT)))
-            | Err((_, Some(nix::errno::Errno::EBUSY))) => {
+        let handle = match handle_result {
+            Err((_, alsa::nix::errno::Errno::ENOENT))
+            | Err((_, alsa::nix::errno::Errno::EBUSY)) => {
                 return Err(SupportedStreamConfigsError::DeviceNotAvailable)
             }
-            Err((_, Some(nix::errno::Errno::EINVAL))) => {
+            Err((_, alsa::nix::errno::Errno::EINVAL)) => {
                 return Err(SupportedStreamConfigsError::InvalidArgument)
             }
             Err((e, _)) => return Err(e.into()),
             Ok(handle) => handle,
         };
 
-        let hw_params = alsa::pcm::HwParams::any(&handle)?;
+        let hw_params = alsa::pcm::HwParams::any(handle)?;
 
-        // TODO: check endianess
-        const FORMATS: [(SampleFormat, alsa::pcm::Format); 3] = [
-            //SND_PCM_FORMAT_S8,
-            //SND_PCM_FORMAT_U8,
+        // TODO: check endianness
+        const FORMATS: [(SampleFormat, alsa::pcm::Format); 8] = [
+            (SampleFormat::I8, alsa::pcm::Format::S8),
+            (SampleFormat::U8, alsa::pcm::Format::U8),
             (SampleFormat::I16, alsa::pcm::Format::S16LE),
             //SND_PCM_FORMAT_S16_BE,
             (SampleFormat::U16, alsa::pcm::Format::U16LE),
@@ -264,13 +341,13 @@ impl Device {
             //SND_PCM_FORMAT_S24_BE,
             //SND_PCM_FORMAT_U24_LE,
             //SND_PCM_FORMAT_U24_BE,
-            //SND_PCM_FORMAT_S32_LE,
+            (SampleFormat::I32, alsa::pcm::Format::S32LE),
             //SND_PCM_FORMAT_S32_BE,
-            //SND_PCM_FORMAT_U32_LE,
+            (SampleFormat::U32, alsa::pcm::Format::U32LE),
             //SND_PCM_FORMAT_U32_BE,
             (SampleFormat::F32, alsa::pcm::Format::FloatLE),
             //SND_PCM_FORMAT_FLOAT_BE,
-            //SND_PCM_FORMAT_FLOAT64_LE,
+            (SampleFormat::F64, alsa::pcm::Format::Float64LE),
             //SND_PCM_FORMAT_FLOAT64_BE,
             //SND_PCM_FORMAT_IEC958_SUBFRAME_LE,
             //SND_PCM_FORMAT_IEC958_SUBFRAME_BE,
@@ -319,7 +396,7 @@ impl Device {
                 }
             }
 
-            if rates.len() == 0 {
+            if rates.is_empty() {
                 vec![(min_rate, max_rate)]
             } else {
                 rates
@@ -352,14 +429,14 @@ impl Device {
             supported_formats.len() * supported_channels.len() * sample_rates.len(),
         );
         for &sample_format in supported_formats.iter() {
-            for channels in supported_channels.iter() {
+            for &channels in supported_channels.iter() {
                 for &(min_rate, max_rate) in sample_rates.iter() {
                     output.push(SupportedStreamConfigRange {
-                        channels: channels.clone(),
+                        channels,
                         min_sample_rate: SampleRate(min_rate as u32),
                         max_sample_rate: SampleRate(max_rate as u32),
                         buffer_size: buffer_size_range.clone(),
-                        sample_format: sample_format,
+                        sample_format,
                     });
                 }
             }
@@ -392,7 +469,7 @@ impl Device {
                     return Err(DefaultStreamConfigError::DeviceNotAvailable);
                 }
                 Err(SupportedStreamConfigsError::InvalidArgument) => {
-                    // this happens sometimes when querying for input and output capabilities but
+                    // this happens sometimes when querying for input and output capabilities, but
                     // the device supports only one
                     return Err(DefaultStreamConfigError::StreamTypeNotSupported);
                 }
@@ -483,10 +560,26 @@ pub struct Stream {
     trigger: TriggerSender,
 }
 
-#[derive(Default)]
 struct StreamWorkerContext {
     descriptors: Vec<libc::pollfd>,
     buffer: Vec<u8>,
+    poll_timeout: i32,
+}
+
+impl StreamWorkerContext {
+    fn new(poll_timeout: &Option<Duration>) -> Self {
+        let poll_timeout: i32 = if let Some(d) = poll_timeout {
+            d.as_millis().try_into().unwrap()
+        } else {
+            -1
+        };
+
+        Self {
+            descriptors: Vec::new(),
+            buffer: Vec::new(),
+            poll_timeout,
+        }
+    }
 }
 
 fn input_stream_worker(
@@ -494,17 +587,26 @@ fn input_stream_worker(
     stream: &StreamInner,
     data_callback: &mut (dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static),
     error_callback: &mut (dyn FnMut(StreamError) + Send + 'static),
+    timeout: Option<Duration>,
 ) {
-    let mut ctxt = StreamWorkerContext::default();
+    let mut ctxt = StreamWorkerContext::new(&timeout);
     loop {
-        let flow = report_error(
-            poll_descriptors_and_prepare_buffer(&rx, stream, &mut ctxt),
-            error_callback,
-        )
-        .unwrap_or(PollDescriptorsFlow::Continue);
+        let flow =
+            poll_descriptors_and_prepare_buffer(&rx, stream, &mut ctxt).unwrap_or_else(|err| {
+                error_callback(err.into());
+                PollDescriptorsFlow::Continue
+            });
 
         match flow {
-            PollDescriptorsFlow::Continue => continue,
+            PollDescriptorsFlow::Continue => {
+                continue;
+            }
+            PollDescriptorsFlow::XRun => {
+                if let Err(err) = stream.channel.prepare() {
+                    error_callback(err.into());
+                }
+                continue;
+            }
             PollDescriptorsFlow::Return => return,
             PollDescriptorsFlow::Ready {
                 status,
@@ -517,14 +619,15 @@ fn input_stream_worker(
                     StreamType::Input,
                     "expected input stream, but polling descriptors indicated output",
                 );
-                let res = process_input(
+                if let Err(err) = process_input(
                     stream,
                     &mut ctxt.buffer,
                     status,
                     delay_frames,
                     data_callback,
-                );
-                report_error(res, error_callback);
+                ) {
+                    error_callback(err.into());
+                }
             }
         }
     }
@@ -535,17 +638,24 @@ fn output_stream_worker(
     stream: &StreamInner,
     data_callback: &mut (dyn FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static),
     error_callback: &mut (dyn FnMut(StreamError) + Send + 'static),
+    timeout: Option<Duration>,
 ) {
-    let mut ctxt = StreamWorkerContext::default();
+    let mut ctxt = StreamWorkerContext::new(&timeout);
     loop {
-        let flow = report_error(
-            poll_descriptors_and_prepare_buffer(&rx, stream, &mut ctxt),
-            error_callback,
-        )
-        .unwrap_or(PollDescriptorsFlow::Continue);
+        let flow =
+            poll_descriptors_and_prepare_buffer(&rx, stream, &mut ctxt).unwrap_or_else(|err| {
+                error_callback(err.into());
+                PollDescriptorsFlow::Continue
+            });
 
         match flow {
             PollDescriptorsFlow::Continue => continue,
+            PollDescriptorsFlow::XRun => {
+                if let Err(err) = stream.channel.prepare() {
+                    error_callback(err.into());
+                }
+                continue;
+            }
             PollDescriptorsFlow::Return => return,
             PollDescriptorsFlow::Ready {
                 status,
@@ -558,7 +668,7 @@ fn output_stream_worker(
                     StreamType::Output,
                     "expected output stream, but polling descriptors indicated input",
                 );
-                let res = process_output(
+                if let Err(err) = process_output(
                     stream,
                     &mut ctxt.buffer,
                     status,
@@ -566,25 +676,10 @@ fn output_stream_worker(
                     delay_frames,
                     data_callback,
                     error_callback,
-                );
-                report_error(res, error_callback);
+                ) {
+                    error_callback(err.into());
+                }
             }
-        }
-    }
-}
-
-fn report_error<T, E>(
-    result: Result<T, E>,
-    error_callback: &mut (dyn FnMut(StreamError) + Send + 'static),
-) -> Option<T>
-where
-    E: Into<StreamError>,
-{
-    match result {
-        Ok(val) => Some(val),
-        Err(err) => {
-            error_callback(err.into());
-            None
         }
     }
 }
@@ -598,6 +693,7 @@ enum PollDescriptorsFlow {
         avail_frames: usize,
         delay_frames: usize,
     },
+    XRun,
 }
 
 // This block is shared between both input and output stream worker functions.
@@ -609,6 +705,7 @@ fn poll_descriptors_and_prepare_buffer(
     let StreamWorkerContext {
         ref mut descriptors,
         ref mut buffer,
+        ref poll_timeout,
     } = *ctxt;
 
     descriptors.clear();
@@ -634,7 +731,7 @@ fn poll_descriptors_and_prepare_buffer(
     debug_assert_eq!(filled, stream.num_descriptors);
 
     // Don't timeout, wait forever.
-    let res = alsa::poll::poll(descriptors, -1)?;
+    let res = alsa::poll::poll(descriptors, *poll_timeout)?;
     if res == 0 {
         let description = String::from("`alsa::poll()` spuriously returned");
         return Err(BackendSpecificError { description });
@@ -656,7 +753,12 @@ fn poll_descriptors_and_prepare_buffer(
     };
 
     let status = stream.channel.status()?;
-    let avail_frames = status.get_avail() as usize;
+    let avail_frames = match stream.channel.avail() {
+        Err(err) if err.errno() == alsa::nix::errno::Errno::EPIPE => {
+            return Ok(PollDescriptorsFlow::XRun)
+        }
+        res => res,
+    }? as usize;
     let delay_frames = match status.get_delay() {
         // Buffer underrun. TODO: Notify the user.
         d if d < 0 => 0,
@@ -689,7 +791,7 @@ fn process_input(
     delay_frames: usize,
     data_callback: &mut (dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static),
 ) -> Result<(), BackendSpecificError> {
-    stream.channel.io().readi(buffer)?;
+    stream.channel.io_bytes().readi(buffer)?;
     let sample_format = stream.sample_format;
     let data = buffer.as_mut_ptr() as *mut ();
     let len = buffer.len() / sample_format.sample_size();
@@ -734,8 +836,8 @@ fn process_output(
         data_callback(&mut data, &info);
     }
     loop {
-        match stream.channel.io().writei(buffer) {
-            Err(err) if err.errno() == Some(nix::errno::Errno::EPIPE) => {
+        match stream.channel.io_bytes().writei(buffer) {
+            Err(err) if err.errno() == alsa::nix::errno::Errno::EPIPE => {
                 // buffer underrun
                 // TODO: Notify the user of this.
                 let _ = stream.channel.try_recover(err, false);
@@ -772,14 +874,13 @@ fn stream_timestamp(
         None => {
             let trigger_ts = status.get_trigger_htstamp();
             let ts = status.get_htstamp();
-            let nanos = timespec_diff_nanos(ts, trigger_ts)
-                .try_into()
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "get_htstamp `{:?}` was earlier than get_trigger_htstamp `{:?}`",
-                        ts, trigger_ts
-                    );
-                });
+            let nanos = timespec_diff_nanos(ts, trigger_ts);
+            if nanos < 0 {
+                panic!(
+                    "get_htstamp `{:?}` was earlier than get_trigger_htstamp `{:?}`",
+                    ts, trigger_ts
+                );
+            }
             Ok(crate::StreamInstant::from_nanos(nanos))
         }
         Some(creation) => {
@@ -817,6 +918,7 @@ impl Stream {
         inner: Arc<StreamInner>,
         mut data_callback: D,
         mut error_callback: E,
+        timeout: Option<Duration>,
     ) -> Stream
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -825,9 +927,18 @@ impl Stream {
         let (tx, rx) = trigger();
         // Clone the handle for passing into worker thread.
         let stream = inner.clone();
-        let thread = thread::spawn(move || {
-            input_stream_worker(rx, &*stream, &mut data_callback, &mut error_callback);
-        });
+        let thread = thread::Builder::new()
+            .name("cpal_alsa_in".to_owned())
+            .spawn(move || {
+                input_stream_worker(
+                    rx,
+                    &stream,
+                    &mut data_callback,
+                    &mut error_callback,
+                    timeout,
+                );
+            })
+            .unwrap();
         Stream {
             thread: Some(thread),
             inner,
@@ -839,6 +950,7 @@ impl Stream {
         inner: Arc<StreamInner>,
         mut data_callback: D,
         mut error_callback: E,
+        timeout: Option<Duration>,
     ) -> Stream
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -847,9 +959,18 @@ impl Stream {
         let (tx, rx) = trigger();
         // Clone the handle for passing into worker thread.
         let stream = inner.clone();
-        let thread = thread::spawn(move || {
-            output_stream_worker(rx, &*stream, &mut data_callback, &mut error_callback);
-        });
+        let thread = thread::Builder::new()
+            .name("cpal_alsa_out".to_owned())
+            .spawn(move || {
+                output_stream_worker(
+                    rx,
+                    &stream,
+                    &mut data_callback,
+                    &mut error_callback,
+                    timeout,
+                );
+            })
+            .unwrap();
         Stream {
             thread: Some(thread),
             inner,
@@ -876,25 +997,63 @@ impl StreamTrait for Stream {
     }
 }
 
-fn set_hw_params_from_format<'a>(
-    pcm_handle: &'a alsa::pcm::PCM,
+fn set_hw_params_from_format(
+    pcm_handle: &alsa::pcm::PCM,
     config: &StreamConfig,
     sample_format: SampleFormat,
-) -> Result<alsa::pcm::HwParams<'a>, BackendSpecificError> {
+) -> Result<bool, BackendSpecificError> {
     let hw_params = alsa::pcm::HwParams::any(pcm_handle)?;
     hw_params.set_access(alsa::pcm::Access::RWInterleaved)?;
 
     let sample_format = if cfg!(target_endian = "big") {
         match sample_format {
+            SampleFormat::I8 => alsa::pcm::Format::S8,
             SampleFormat::I16 => alsa::pcm::Format::S16BE,
+            // SampleFormat::I24 => alsa::pcm::Format::S24BE,
+            SampleFormat::I32 => alsa::pcm::Format::S32BE,
+            // SampleFormat::I48 => alsa::pcm::Format::S48BE,
+            // SampleFormat::I64 => alsa::pcm::Format::S64BE,
+            SampleFormat::U8 => alsa::pcm::Format::U8,
             SampleFormat::U16 => alsa::pcm::Format::U16BE,
+            // SampleFormat::U24 => alsa::pcm::Format::U24BE,
+            SampleFormat::U32 => alsa::pcm::Format::U32BE,
+            // SampleFormat::U48 => alsa::pcm::Format::U48BE,
+            // SampleFormat::U64 => alsa::pcm::Format::U64BE,
             SampleFormat::F32 => alsa::pcm::Format::FloatBE,
+            SampleFormat::F64 => alsa::pcm::Format::Float64BE,
+            sample_format => {
+                return Err(BackendSpecificError {
+                    description: format!(
+                        "Sample format '{}' is not supported by this backend",
+                        sample_format
+                    ),
+                })
+            }
         }
     } else {
         match sample_format {
+            SampleFormat::I8 => alsa::pcm::Format::S8,
             SampleFormat::I16 => alsa::pcm::Format::S16LE,
+            // SampleFormat::I24 => alsa::pcm::Format::S24LE,
+            SampleFormat::I32 => alsa::pcm::Format::S32LE,
+            // SampleFormat::I48 => alsa::pcm::Format::S48LE,
+            // SampleFormat::I64 => alsa::pcm::Format::S64LE,
+            SampleFormat::U8 => alsa::pcm::Format::U8,
             SampleFormat::U16 => alsa::pcm::Format::U16LE,
+            // SampleFormat::U24 => alsa::pcm::Format::U24LE,
+            SampleFormat::U32 => alsa::pcm::Format::U32LE,
+            // SampleFormat::U48 => alsa::pcm::Format::U48LE,
+            // SampleFormat::U64 => alsa::pcm::Format::U64LE,
             SampleFormat::F32 => alsa::pcm::Format::FloatLE,
+            SampleFormat::F64 => alsa::pcm::Format::Float64LE,
+            sample_format => {
+                return Err(BackendSpecificError {
+                    description: format!(
+                        "Sample format '{}' is not supported by this backend",
+                        sample_format
+                    ),
+                })
+            }
         }
     };
 
@@ -903,10 +1062,13 @@ fn set_hw_params_from_format<'a>(
     hw_params.set_channels(config.channels as u32)?;
 
     match config.buffer_size {
-        BufferSize::Fixed(v) => hw_params.set_buffer_size(v as alsa::pcm::Frames)?,
+        BufferSize::Fixed(v) => {
+            hw_params.set_period_size_near((v / 4) as alsa::pcm::Frames, alsa::ValueOr::Nearest)?;
+            hw_params.set_buffer_size(v as alsa::pcm::Frames)?;
+        }
         BufferSize::Default => {
             // These values together represent a moderate latency and wakeup interval.
-            // Without them we are at the mercy of the device
+            // Without them, we are at the mercy of the device
             hw_params.set_period_time_near(25_000, alsa::ValueOr::Nearest)?;
             hw_params.set_buffer_time_near(100_000, alsa::ValueOr::Nearest)?;
         }
@@ -914,17 +1076,17 @@ fn set_hw_params_from_format<'a>(
 
     pcm_handle.hw_params(&hw_params)?;
 
-    Ok(hw_params)
+    Ok(hw_params.can_pause())
 }
 
 fn set_sw_params_from_format(
     pcm_handle: &alsa::pcm::PCM,
     config: &StreamConfig,
-) -> Result<(usize, usize), BackendSpecificError> {
+    stream_type: alsa::Direction,
+) -> Result<usize, BackendSpecificError> {
     let sw_params = pcm_handle.sw_params_current()?;
-    sw_params.set_start_threshold(0)?;
 
-    let (buffer_len, period_len) = {
+    let period_len = {
         let (buffer, period) = pcm_handle.get_params()?;
         if buffer == 0 {
             return Err(BackendSpecificError {
@@ -932,19 +1094,33 @@ fn set_sw_params_from_format(
             });
         }
         sw_params.set_avail_min(period as alsa::pcm::Frames)?;
-        let buffer = buffer as usize * config.channels as usize;
-        let period = period as usize * config.channels as usize;
-        (buffer, period)
+
+        let start_threshold = match stream_type {
+            alsa::Direction::Playback => buffer - period,
+
+            // For capture streams, the start threshold is irrelevant and ignored,
+            // because build_stream_inner() starts the stream before process_input()
+            // reads from it. Set it anyway I guess, since it's better than leaving
+            // it at an unspecified default value.
+            alsa::Direction::Capture => 1,
+        };
+        sw_params.set_start_threshold(start_threshold.try_into().unwrap())?;
+
+        period as usize * config.channels as usize
     };
 
     sw_params.set_tstamp_mode(true)?;
-    // TODO:
-    // Pending new version of alsa-sys and alsa-rs getting published.
-    // sw_params.set_tstamp_type(alsa::pcm::TstampType::MonotonicRaw)?;
+    sw_params.set_tstamp_type(alsa::pcm::TstampType::MonotonicRaw)?;
 
-    pcm_handle.sw_params(&sw_params)?;
+    // tstamp_type param cannot be changed after the device is opened.
+    // The default tstamp_type value on most Linux systems is "monotonic",
+    // let's try to use it if setting the tstamp_type fails.
+    if pcm_handle.sw_params(&sw_params).is_err() {
+        sw_params.set_tstamp_type(alsa::pcm::TstampType::Monotonic)?;
+        pcm_handle.sw_params(&sw_params)?;
+    }
 
-    Ok((buffer_len, period_len))
+    Ok(period_len)
 }
 
 impl From<alsa::Error> for BackendSpecificError {

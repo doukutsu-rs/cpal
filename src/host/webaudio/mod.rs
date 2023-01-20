@@ -6,6 +6,7 @@ use self::js_sys::eval;
 use self::wasm_bindgen::prelude::*;
 use self::wasm_bindgen::JsCast;
 use self::web_sys::{AudioContext, AudioContextOptions};
+use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::{
     BackendSpecificError, BufferSize, BuildStreamError, Data, DefaultStreamConfigError,
     DeviceNameError, DevicesError, InputCallbackInfo, OutputCallbackInfo, PauseStreamError,
@@ -14,7 +15,7 @@ use crate::{
 };
 use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, RwLock};
-use traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::time::Duration;
 
 /// Content is false if the iterator is empty.
 pub struct Devices(bool);
@@ -40,7 +41,7 @@ const MIN_SAMPLE_RATE: SampleRate = SampleRate(8_000);
 const MAX_SAMPLE_RATE: SampleRate = SampleRate(96_000);
 const DEFAULT_SAMPLE_RATE: SampleRate = SampleRate(44_100);
 const MIN_BUFFER_SIZE: u32 = 1;
-const MAX_BUFFER_SIZE: u32 = std::u32::MAX;
+const MAX_BUFFER_SIZE: u32 = u32::MAX;
 const DEFAULT_BUFFER_SIZE: usize = 2048;
 const SUPPORTED_SAMPLE_FORMAT: SampleFormat = SampleFormat::F32;
 
@@ -121,13 +122,13 @@ impl Device {
     #[inline]
     fn default_output_config(&self) -> Result<SupportedStreamConfig, DefaultStreamConfigError> {
         const EXPECT: &str = "expected at least one valid webaudio stream config";
-        let mut configs: Vec<_> = self.supported_output_configs().expect(EXPECT).collect();
-        configs.sort_by(|a, b| a.cmp_default_heuristics(b));
-        let config = configs
-            .into_iter()
-            .next()
+        let config = self
+            .supported_output_configs()
             .expect(EXPECT)
+            .max_by(|a, b| a.cmp_default_heuristics(b))
+            .unwrap()
             .with_sample_rate(DEFAULT_SAMPLE_RATE);
+
         Ok(config)
     }
 }
@@ -172,6 +173,7 @@ impl DeviceTrait for Device {
         _sample_format: SampleFormat,
         _data_callback: D,
         _error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -188,6 +190,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         data_callback: D,
         _error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -234,7 +237,7 @@ impl DeviceTrait for Device {
         let time = Arc::new(RwLock::new(0f64));
 
         // Create a set of closures / callbacks which will continuously fetch and schedule sample
-        // playback. Starting with two workers, eg a front and back buffer so that audio frames
+        // playback. Starting with two workers, e.g. a front and back buffer so that audio frames
         // can be fetched in the background.
         for _i in 0..2 {
             let data_callback_handle = data_callback.clone();
@@ -297,7 +300,7 @@ impl DeviceTrait for Device {
                     }
 
                     // Deinterleave the sample data and copy into the audio context buffer.
-                    // We do not reference the audio context buffer directly eg getChannelData.
+                    // We do not reference the audio context buffer directly e.g. getChannelData.
                     // As wasm-bindgen only gives us a copy, not a direct reference.
                     for channel in 0..n_channels {
                         for i in 0..buffer_size_frames {
@@ -347,6 +350,14 @@ impl DeviceTrait for Device {
             config: config.clone(),
             buffer_size_frames,
         })
+    }
+}
+
+impl Stream {
+    /// Return the [`AudioContext`](https://developer.mozilla.org/docs/Web/API/AudioContext) used
+    /// by this stream.
+    pub fn audio_context(&self) -> &AudioContext {
+        &*self.ctx
     }
 }
 

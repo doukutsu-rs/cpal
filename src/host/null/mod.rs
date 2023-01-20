@@ -1,10 +1,12 @@
+use std::time::Duration;
+
+use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::{
     BuildStreamError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
     InputCallbackInfo, OutputCallbackInfo, PauseStreamError, PlayStreamError, SampleFormat,
     StreamConfig, StreamError, SupportedStreamConfig, SupportedStreamConfigRange,
     SupportedStreamConfigsError,
 };
-use traits::{DeviceTrait, HostTrait, StreamTrait};
 
 #[derive(Default)]
 pub struct Devices;
@@ -73,6 +75,7 @@ impl DeviceTrait for Device {
         _sample_format: SampleFormat,
         _data_callback: D,
         _error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -88,6 +91,7 @@ impl DeviceTrait for Device {
         _sample_format: SampleFormat,
         _data_callback: D,
         _error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -98,8 +102,8 @@ impl DeviceTrait for Device {
 }
 
 impl HostTrait for Host {
-    type Device = Device;
     type Devices = Devices;
+    type Device = Device;
 
     fn is_available() -> bool {
         false

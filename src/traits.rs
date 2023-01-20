@@ -1,13 +1,15 @@
 //! The suite of traits allowing CPAL to abstract over hosts, devices, event loops and stream IDs.
 
-use {
+use std::time::Duration;
+
+use crate::{
     BuildStreamError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
     InputCallbackInfo, InputDevices, OutputCallbackInfo, OutputDevices, PauseStreamError,
-    PlayStreamError, Sample, SampleFormat, StreamConfig, StreamError, SupportedStreamConfig,
+    PlayStreamError, SampleFormat, SizedSample, StreamConfig, StreamError, SupportedStreamConfig,
     SupportedStreamConfigRange, SupportedStreamConfigsError,
 };
 
-/// A **Host** provides access to the available audio devices on the system.
+/// A [`Host`] provides access to the available audio devices on the system.
 ///
 /// Each platform may have a number of available hosts depending on the system, each with their own
 /// pros and cons.
@@ -25,7 +27,9 @@ use {
 /// however it has its own limitations w.r.t. low-latency and high-performance audio applications.
 /// JACK is yet another host API that is more suitable to pro-audio applications, however it is
 /// less readily available by default in many Linux distributions and is known to be tricky to
-/// setup.
+/// set up.
+///
+/// [`Host`]: crate::Host
 pub trait HostTrait {
     /// The type used for enumerating available devices by the host.
     type Devices: Iterator<Item = Self::Device>;
@@ -35,7 +39,7 @@ pub trait HostTrait {
     /// Whether or not the host is available on the system.
     fn is_available() -> bool;
 
-    /// An iterator yielding all `Device`s currently available to the host on the system.
+    /// An iterator yielding all [`Device`](DeviceTrait)s currently available to the host on the system.
     ///
     /// Can be empty if the system does not support audio in general.
     fn devices(&self) -> Result<Self::Devices, DevicesError>;
@@ -81,14 +85,17 @@ pub trait HostTrait {
 
 /// A device that is capable of audio input and/or output.
 ///
-/// Please note that `Device`s may become invalid if they get disconnected. Therefore all the
+/// Please note that `Device`s may become invalid if they get disconnected. Therefore, all the
 /// methods that involve a device return a `Result` allowing the user to handle this case.
 pub trait DeviceTrait {
     /// The iterator type yielding supported input stream formats.
     type SupportedInputConfigs: Iterator<Item = SupportedStreamConfigRange>;
     /// The iterator type yielding supported output stream formats.
     type SupportedOutputConfigs: Iterator<Item = SupportedStreamConfigRange>;
-    /// The stream type created by `build_input_stream_raw` and `build_output_stream_raw`.
+    /// The stream type created by [`build_input_stream_raw`] and [`build_output_stream_raw`].
+    ///
+    /// [`build_input_stream_raw`]: Self::build_input_stream_raw
+    /// [`build_output_stream_raw`]: Self::build_output_stream_raw
     type Stream: StreamTrait;
 
     /// The human-readable name of the device.
@@ -96,14 +103,14 @@ pub trait DeviceTrait {
 
     /// An iterator yielding formats that are supported by the backend.
     ///
-    /// Can return an error if the device is no longer valid (eg. it has been disconnected).
+    /// Can return an error if the device is no longer valid (e.g. it has been disconnected).
     fn supported_input_configs(
         &self,
     ) -> Result<Self::SupportedInputConfigs, SupportedStreamConfigsError>;
 
     /// An iterator yielding output stream formats that are supported by the device.
     ///
-    /// Can return an error if the device is no longer valid (eg. it has been disconnected).
+    /// Can return an error if the device is no longer valid (e.g. it has been disconnected).
     fn supported_output_configs(
         &self,
     ) -> Result<Self::SupportedOutputConfigs, SupportedStreamConfigsError>;
@@ -120,9 +127,10 @@ pub trait DeviceTrait {
         config: &StreamConfig,
         mut data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
-        T: Sample,
+        T: SizedSample,
         D: FnMut(&[T], &InputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static,
     {
@@ -137,6 +145,7 @@ pub trait DeviceTrait {
                 )
             },
             error_callback,
+            timeout,
         )
     }
 
@@ -146,9 +155,10 @@ pub trait DeviceTrait {
         config: &StreamConfig,
         mut data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
-        T: Sample,
+        T: SizedSample,
         D: FnMut(&mut [T], &OutputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static,
     {
@@ -163,6 +173,7 @@ pub trait DeviceTrait {
                 )
             },
             error_callback,
+            timeout,
         )
     }
 
@@ -173,6 +184,7 @@ pub trait DeviceTrait {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -185,13 +197,14 @@ pub trait DeviceTrait {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static;
 }
 
-/// A stream created from `Device`, with methods to control playback.
+/// A stream created from [`Device`](DeviceTrait), with methods to control playback.
 pub trait StreamTrait {
     /// Run the stream.
     ///

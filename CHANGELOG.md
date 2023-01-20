@@ -1,3 +1,49 @@
+# Unreleased
+- Update `windows-rs` dependency
+
+# Version 0.14.1 (2022-10-23)
+
+- Support the 0.6.1 release of `alsa-rs`
+- Fix `asio` feature broken in 0.14.0
+- `NetBSD` support
+- CI improvements
+
+# Version 0.14.0 (2022-08-22)
+
+- Switch to `windows-rs` crate
+- Turn `ndk-glue` into a dev-dependency and use `ndk-context` instead
+- Update dependencies (ndk, ndk-glue, parking_lot, once_cell, jack)
+
+# Version 0.13.5 (2022-01-28)
+
+- Faster sample format conversion
+- Update dependencies (ndk, oboe, ndk-glue, jack, alsa, nix)
+
+# Version 0.13.4 (2021-08-08)
+
+- wasapi: Allow both threading models and switch the default to STA
+- Update dependencies (core-foundation-sys, jni, rust-jack)
+- Alsa: improve stream setup parameters
+
+# Version 0.13.3 (2021-03-29)
+
+- Give each thread a unique name
+- Fix distortion regression on some alsa configs
+
+# Version 0.13.2 (2021-03-16)
+
+- Update dependencies (ndk, nix, oboe, jni, etc)
+
+# Version 0.13.1 (2020-11-08)
+
+- Don't panic when device is plugged out on Windows
+- Update `parking_lot` dependency
+
+# Version 0.13.0 (2020-10-28)
+
+- Add Android support via `oboe-rs`.
+- Add Android APK build an CI job.
+
 # Version 0.12.1 (2020-07-23)
 
 - Bugfix release to get the asio feature working again.
@@ -87,7 +133,7 @@
 - Rename the `samples_rate` field of `Format` to `sample_rate`
 - Changed the type of the `channels` field of the `SupportedFormat` struct from `Vec<ChannelPosition>` to `ChannelCount` (an alias to `u16`)
 - Remove unused ChannelPosition API.
-- Implement `Endpoint` and `Format` Enumeration for macos.
+- Implement `Endpoint` and `Format` Enumeration for macOS.
 - Implement format handling for macos `build_voice` method.
 
 # Version 0.6.0 (2017-12-11)
@@ -96,7 +142,7 @@
 - Added improvements to the crate documentation.
 - Implement `pause` and `play` for ALSA backend.
 - Reduced the number of allocations in the CoreAudio backend.
-- Fixes for macos build (#186, #189).
+- Fixes for macOS build (#186, #189).
 
 # Version 0.5.1 (2017-10-21)
 

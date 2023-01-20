@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::cmp;
 use std::convert::TryInto;
+use std::time::Duration;
 use std::vec::IntoIter as VecIntoIter;
 
 extern crate oboe;
@@ -9,7 +10,7 @@ use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::{
     BackendSpecificError, BufferSize, BuildStreamError, Data, DefaultStreamConfigError,
     DeviceNameError, DevicesError, InputCallbackInfo, OutputCallbackInfo, PauseStreamError,
-    PlayStreamError, Sample, SampleFormat, SampleRate, StreamConfig, StreamError,
+    PlayStreamError, SampleFormat, SampleRate, SizedSample, StreamConfig, StreamError,
     SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
     SupportedStreamConfigsError,
 };
@@ -21,6 +22,7 @@ mod output_callback;
 
 use self::android_media::{get_audio_record_min_buffer_size, get_audio_track_min_buffer_size};
 use self::input_callback::CpalInputCallback;
+use self::oboe::{AudioInputStream, AudioOutputStream};
 use self::output_callback::CpalOutputCallback;
 
 // Android Java API supports up to 8 channels, but oboe API
@@ -31,12 +33,15 @@ const CHANNEL_MASKS: [i32; 2] = [
 ];
 
 const SAMPLE_RATES: [i32; 13] = [
-    5512, 8000, 11025, 16000, 22050, 32000, 44100, 48000, 64000, 88200, 96000, 176400, 192000,
+    5512, 8000, 11025, 16000, 22050, 32000, 44100, 48000, 64000, 88200, 96000, 176_400, 192_000,
 ];
 
 pub struct Host;
 pub struct Device(Option<oboe::AudioDeviceInfo>);
-pub struct Stream(Box<RefCell<dyn oboe::AudioStream>>);
+pub enum Stream {
+    Input(Box<RefCell<dyn AudioInputStream>>),
+    Output(Box<RefCell<dyn AudioOutputStream>>),
+}
 pub type SupportedInputConfigs = VecIntoIter<SupportedStreamConfigRange>;
 pub type SupportedOutputConfigs = VecIntoIter<SupportedStreamConfigRange>;
 pub type Devices = VecIntoIter<Device>;
@@ -69,19 +74,11 @@ impl HostTrait for Host {
     }
 
     fn default_input_device(&self) -> Option<Self::Device> {
-        if let Ok(devices) = oboe::AudioDeviceInfo::request(oboe::AudioDeviceDirection::Input) {
-            devices.into_iter().map(|d| Device(Some(d))).next()
-        } else {
-            Some(Device(None))
-        }
+        Some(Device(None))
     }
 
     fn default_output_device(&self) -> Option<Self::Device> {
-        //if let Ok(devices) = oboe::AudioDeviceInfo::request(oboe::AudioDeviceDirection::Output) {
-        //    devices.into_iter().map(|d| Device(Some(d))).next()
-        //} else {
         Some(Device(None))
-        //}
     }
 }
 
@@ -117,14 +114,13 @@ fn default_supported_configs(is_output: bool) -> VecIntoIter<SupportedStreamConf
         } else {
             android_media::ENCODING_PCM_FLOAT
         };
-        for mask_idx in 0..CHANNEL_MASKS.len() {
-            let channel_mask = CHANNEL_MASKS[mask_idx];
+        for (mask_idx, channel_mask) in CHANNEL_MASKS.iter().enumerate() {
             let channel_count = mask_idx + 1;
             for sample_rate in &SAMPLE_RATES {
                 if let SupportedBufferSize::Range { min, max } = buffer_size_range_for_params(
                     is_output,
                     *sample_rate,
-                    channel_mask,
+                    *channel_mask,
                     android_format,
                 ) {
                     output.push(SupportedStreamConfigRange {
@@ -230,7 +226,7 @@ fn build_input_stream<D, E, C, T>(
     builder: oboe::AudioStreamBuilder<oboe::Input, C, T>,
 ) -> Result<Stream, BuildStreamError>
 where
-    T: Sample + oboe::IsFormat + Send + 'static,
+    T: SizedSample + oboe::IsFormat + Send + 'static,
     C: oboe::IsChannelCount + Send + 'static,
     (T, C): oboe::IsFrameType,
     D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -241,10 +237,9 @@ where
         .set_callback(CpalInputCallback::<T, C>::new(
             data_callback,
             error_callback,
-            config.sample_rate,
         ))
         .open_stream()?;
-    Ok(Stream(Box::new(RefCell::new(stream))))
+    Ok(Stream::Input(Box::new(RefCell::new(stream))))
 }
 
 fn build_output_stream<D, E, C, T>(
@@ -255,7 +250,7 @@ fn build_output_stream<D, E, C, T>(
     builder: oboe::AudioStreamBuilder<oboe::Output, C, T>,
 ) -> Result<Stream, BuildStreamError>
 where
-    T: Sample + oboe::IsFormat + Send + 'static,
+    T: SizedSample + oboe::IsFormat + Send + 'static,
     C: oboe::IsChannelCount + Send + 'static,
     (T, C): oboe::IsFrameType,
     D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -266,10 +261,9 @@ where
         .set_callback(CpalOutputCallback::<T, C>::new(
             data_callback,
             error_callback,
-            config.sample_rate,
         ))
         .open_stream()?;
-    Ok(Stream(Box::new(RefCell::new(stream))))
+    Ok(Stream::Output(Box::new(RefCell::new(stream))))
 }
 
 impl DeviceTrait for Device {
@@ -332,6 +326,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -392,8 +387,8 @@ impl DeviceTrait for Device {
                     .into())
                 }
             }
-            SampleFormat::U16 => Err(BackendSpecificError {
-                description: "U16 format is not supported on Android.".to_owned(),
+            sample_format => Err(BackendSpecificError {
+                description: format!("{} format is not supported on Android.", sample_format),
             }
             .into()),
         }
@@ -405,6 +400,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         data_callback: D,
         error_callback: E,
+        _timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
@@ -465,8 +461,8 @@ impl DeviceTrait for Device {
                     .into())
                 }
             }
-            SampleFormat::U16 => Err(BackendSpecificError {
-                description: "U16 format is not supported on Android.".to_owned(),
+            sample_format => Err(BackendSpecificError {
+                description: format!("{} format is not supported on Android.", sample_format),
             }
             .into()),
         }
@@ -475,16 +471,28 @@ impl DeviceTrait for Device {
 
 impl StreamTrait for Stream {
     fn play(&self) -> Result<(), PlayStreamError> {
-        self.0
-            .borrow_mut()
-            .request_start()
-            .map_err(PlayStreamError::from)
+        match self {
+            Self::Input(stream) => stream
+                .borrow_mut()
+                .request_start()
+                .map_err(PlayStreamError::from),
+            Self::Output(stream) => stream
+                .borrow_mut()
+                .request_start()
+                .map_err(PlayStreamError::from),
+        }
     }
 
     fn pause(&self) -> Result<(), PauseStreamError> {
-        self.0
-            .borrow_mut()
-            .request_stop()
-            .map_err(PauseStreamError::from)
+        match self {
+            Self::Input(_) => Err(BackendSpecificError {
+                description: "Pause called on the input stream.".to_owned(),
+            }
+            .into()),
+            Self::Output(stream) => stream
+                .borrow_mut()
+                .request_pause()
+                .map_err(PauseStreamError::from),
+        }
     }
 }

@@ -1,22 +1,21 @@
 use std::marker::PhantomData;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 extern crate oboe;
 
 use super::convert::{stream_instant, to_stream_instant};
-use crate::{Data, InputCallbackInfo, InputStreamTimestamp, Sample, SampleRate, StreamError};
+use crate::{Data, InputCallbackInfo, InputStreamTimestamp, SizedSample, StreamError};
 
 pub struct CpalInputCallback<I, C> {
     data_cb: Box<dyn FnMut(&Data, &InputCallbackInfo) + Send + 'static>,
     error_cb: Box<dyn FnMut(StreamError) + Send + 'static>,
-    sample_rate: SampleRate,
     created: Instant,
     phantom_channel: PhantomData<C>,
     phantom_input: PhantomData<I>,
 }
 
 impl<I, C> CpalInputCallback<I, C> {
-    pub fn new<D, E>(data_cb: D, error_cb: E, sample_rate: SampleRate) -> Self
+    pub fn new<D, E>(data_cb: D, error_cb: E) -> Self
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static,
@@ -24,7 +23,6 @@ impl<I, C> CpalInputCallback<I, C> {
         Self {
             data_cb: Box::new(data_cb),
             error_cb: Box::new(error_cb),
-            sample_rate,
             created: Instant::now(),
             phantom_channel: PhantomData,
             phantom_input: PhantomData,
@@ -44,11 +42,27 @@ impl<I, C> CpalInputCallback<I, C> {
     }
 }
 
-impl<T: Sample, C: oboe::IsChannelCount> oboe::AudioInputCallback for CpalInputCallback<T, C>
+impl<T: SizedSample, C: oboe::IsChannelCount> oboe::AudioInputCallback for CpalInputCallback<T, C>
 where
     (T, C): oboe::IsFrameType,
 {
     type FrameType = (T, C);
+
+    fn on_error_before_close(
+        &mut self,
+        _audio_stream: &mut dyn oboe::AudioInputStreamSafe,
+        error: oboe::Error,
+    ) {
+        (self.error_cb)(StreamError::from(error))
+    }
+
+    fn on_error_after_close(
+        &mut self,
+        _audio_stream: &mut dyn oboe::AudioInputStreamSafe,
+        error: oboe::Error,
+    ) {
+        (self.error_cb)(StreamError::from(error))
+    }
 
     fn on_audio_ready(
         &mut self,
@@ -72,21 +86,5 @@ where
             &cb_info,
         );
         oboe::DataCallbackResult::Continue
-    }
-
-    fn on_error_before_close(
-        &mut self,
-        _audio_stream: &mut dyn oboe::AudioInputStreamSafe,
-        error: oboe::Error,
-    ) {
-        (self.error_cb)(StreamError::from(error))
-    }
-
-    fn on_error_after_close(
-        &mut self,
-        _audio_stream: &mut dyn oboe::AudioInputStreamSafe,
-        error: oboe::Error,
-    ) {
-        (self.error_cb)(StreamError::from(error))
     }
 }
