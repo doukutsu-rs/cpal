@@ -6,8 +6,8 @@ use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 use std::vec::IntoIter as VecIntoIter;
 
-use traits::{DeviceTrait, HostTrait, StreamTrait};
-use StreamInstant;
+use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crate::StreamInstant;
 
 use crate::{
     BackendSpecificError, BufferSize, BuildStreamError, Data, DefaultStreamConfigError,
@@ -235,6 +235,7 @@ impl DeviceTrait for Device {
         _sample_format: SampleFormat,
         _data_callback: D,
         _error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
@@ -253,6 +254,7 @@ impl DeviceTrait for Device {
         sample_format: SampleFormat,
         mut data_callback: D,
         mut error_callback: E,
+        timeout: Option<Duration>,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         D: FnMut(&mut Data, &OutputCallbackInfo) + Send + 'static,
