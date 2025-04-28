@@ -28,7 +28,6 @@ use crate::{
     SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
     SupportedStreamConfigsError,
 };
-use parking_lot::Mutex;
 use std::ffi::CStr;
 use std::fmt;
 use std::mem;
@@ -36,7 +35,7 @@ use std::os::raw::c_char;
 use std::ptr::null;
 use std::slice;
 use std::sync::mpsc::{channel, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub use self::enumerate::{
@@ -297,7 +296,18 @@ impl Device {
             let ranges: *mut AudioValueRange = ranges.as_mut_ptr() as *mut _;
             let ranges: &'static [AudioValueRange] = slice::from_raw_parts(ranges, n_ranges);
 
-            let audio_unit = audio_unit_from_device(self, true)?;
+            #[allow(non_upper_case_globals)]
+            let input = match scope {
+                kAudioObjectPropertyScopeInput => Ok(true),
+                kAudioObjectPropertyScopeOutput => Ok(false),
+                _ => Err(BackendSpecificError {
+                    description: format!(
+                        "unexpected scope (neither input nor output): {:?}",
+                        scope
+                    ),
+                }),
+            }?;
+            let audio_unit = audio_unit_from_device(self, input)?;
             let buffer_size = get_io_buffer_frame_size_range(&audio_unit)?;
 
             // Collect the supported formats for the device.
@@ -307,7 +317,7 @@ impl Device {
                     channels: n_channels as ChannelCount,
                     min_sample_rate: SampleRate(range.mMinimum as _),
                     max_sample_rate: SampleRate(range.mMaximum as _),
-                    buffer_size: buffer_size.clone(),
+                    buffer_size,
                     sample_format,
                 };
                 fmts.push(fmt);
@@ -399,7 +409,18 @@ impl Device {
                 }
             };
 
-            let audio_unit = audio_unit_from_device(self, true)?;
+            #[allow(non_upper_case_globals)]
+            let input = match scope {
+                kAudioObjectPropertyScopeInput => Ok(true),
+                kAudioObjectPropertyScopeOutput => Ok(false),
+                _ => Err(BackendSpecificError {
+                    description: format!(
+                        "unexpected scope (neither input nor output): {:?}",
+                        scope
+                    ),
+                }),
+            }?;
+            let audio_unit = audio_unit_from_device(self, input)?;
             let buffer_size = get_io_buffer_frame_size_range(&audio_unit)?;
 
             let config = SupportedStreamConfig {
@@ -443,6 +464,32 @@ struct StreamInner {
     device_id: AudioDeviceID,
 }
 
+impl StreamInner {
+    fn play(&mut self) -> Result<(), PlayStreamError> {
+        if !self.playing {
+            if let Err(e) = self.audio_unit.start() {
+                let description = format!("{}", e);
+                let err = BackendSpecificError { description };
+                return Err(err.into());
+            }
+            self.playing = true;
+        }
+        Ok(())
+    }
+
+    fn pause(&mut self) -> Result<(), PauseStreamError> {
+        if self.playing {
+            if let Err(e) = self.audio_unit.stop() {
+                let description = format!("{}", e);
+                let err = BackendSpecificError { description };
+                return Err(err.into());
+            }
+            self.playing = false;
+        }
+        Ok(())
+    }
+}
+
 /// Register the on-disconnect callback.
 /// This will both stop the stream and call the error callback with DeviceNotAvailable.
 /// This function should only be called once per stream.
@@ -453,8 +500,8 @@ fn add_disconnect_listener<E>(
 where
     E: FnMut(StreamError) + Send + 'static,
 {
-    let stream_copy = stream.clone();
-    let mut stream_inner = stream.inner.lock();
+    let stream_inner_weak = Arc::downgrade(&stream.inner);
+    let mut stream_inner = stream.inner.lock().unwrap();
     stream_inner._disconnect_listener = Some(AudioObjectPropertyListener::new(
         stream_inner.device_id,
         AudioObjectPropertyAddress {
@@ -463,8 +510,11 @@ where
             mElement: kAudioObjectPropertyElementMaster,
         },
         move || {
-            let _ = stream_copy.pause();
-            (error_callback.lock())(StreamError::DeviceNotAvailable);
+            if let Some(stream_inner_strong) = stream_inner_weak.upgrade() {
+                let mut stream_inner = stream_inner_strong.lock().unwrap();
+                let _ = stream_inner.pause();
+                (error_callback.lock().unwrap())(StreamError::DeviceNotAvailable);
+            }
         },
     )?);
     Ok(())
@@ -569,7 +619,7 @@ impl Device {
         let sample_rate = config.sample_rate;
         type Args = render_callback::Args<data::Raw>;
         audio_unit.set_input_callback(move |args: Args| unsafe {
-            let ptr = (*args.data.data).mBuffers.as_ptr() as *const AudioBuffer;
+            let ptr = (*args.data.data).mBuffers.as_ptr();
             let len = (*args.data.data).mNumberBuffers as usize;
             let buffers: &[AudioBuffer] = slice::from_raw_parts(ptr, len);
 
@@ -581,13 +631,13 @@ impl Device {
             } = buffers[0];
 
             let data = data as *mut ();
-            let len = (data_byte_size as usize / bytes_per_channel) as usize;
+            let len = data_byte_size as usize / bytes_per_channel;
             let data = Data::from_parts(data, len, sample_format);
 
             // TODO: Need a better way to get delay, for now we assume a double-buffer offset.
             let callback = match host_time_to_stream_instant(args.time_stamp.mHostTime) {
                 Err(err) => {
-                    (error_callback.lock())(err.into());
+                    (error_callback.lock().unwrap())(err.into());
                     return Err(());
                 }
                 Ok(cb) => cb,
@@ -617,7 +667,7 @@ impl Device {
             add_disconnect_listener(&stream, error_callback_disconnect)?;
         }
 
-        stream.inner.lock().audio_unit.start()?;
+        stream.inner.lock().unwrap().audio_unit.start()?;
 
         Ok(stream)
     }
@@ -686,12 +736,12 @@ impl Device {
             } = (*args.data.data).mBuffers[0];
 
             let data = data as *mut ();
-            let len = (data_byte_size as usize / bytes_per_channel) as usize;
+            let len = data_byte_size as usize / bytes_per_channel;
             let mut data = Data::from_parts(data, len, sample_format);
 
             let callback = match host_time_to_stream_instant(args.time_stamp.mHostTime) {
                 Err(err) => {
-                    (error_callback.lock())(err.into());
+                    (error_callback.lock().unwrap())(err.into());
                     return Err(());
                 }
                 Ok(cb) => cb,
@@ -722,7 +772,7 @@ impl Device {
             add_disconnect_listener(&stream, error_callback_disconnect)?;
         }
 
-        stream.inner.lock().audio_unit.start()?;
+        stream.inner.lock().unwrap().audio_unit.start()?;
 
         Ok(stream)
     }
@@ -896,32 +946,15 @@ impl Stream {
 
 impl StreamTrait for Stream {
     fn play(&self) -> Result<(), PlayStreamError> {
-        let mut stream = self.inner.lock();
+        let mut stream = self.inner.lock().unwrap();
 
-        if !stream.playing {
-            if let Err(e) = stream.audio_unit.start() {
-                let description = format!("{}", e);
-                let err = BackendSpecificError { description };
-                return Err(err.into());
-            }
-            stream.playing = true;
-        }
-        Ok(())
+        stream.play()
     }
 
     fn pause(&self) -> Result<(), PauseStreamError> {
-        let mut stream = self.inner.lock();
+        let mut stream = self.inner.lock().unwrap();
 
-        if stream.playing {
-            if let Err(e) = stream.audio_unit.stop() {
-                let description = format!("{}", e);
-                let err = BackendSpecificError { description };
-                return Err(err.into());
-            }
-
-            stream.playing = false;
-        }
-        Ok(())
+        stream.pause()
     }
 }
 

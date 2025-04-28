@@ -6,14 +6,14 @@ use crate::{
 };
 use std::mem;
 use std::ptr;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio;
 use windows::Win32::System::SystemServices;
 use windows::Win32::System::Threading;
-use windows::Win32::System::WindowsProgramming;
 
 pub struct Stream {
     /// The high-priority audio processing thread calling callbacks.
@@ -147,34 +147,36 @@ impl Stream {
     }
 
     #[inline]
-    fn push_command(&self, command: Command) {
-        // Sender generally outlives receiver, unless the device gets unplugged.
-        let _ = self.commands.send(command);
+    fn push_command(&self, command: Command) -> Result<(), SendError<Command>> {
+        self.commands.send(command)?;
         unsafe {
-            let result = Threading::SetEvent(self.pending_scheduled_event);
-            assert_ne!(result, false);
+            Threading::SetEvent(self.pending_scheduled_event).unwrap();
         }
+        Ok(())
     }
 }
 
 impl Drop for Stream {
     #[inline]
     fn drop(&mut self) {
-        self.push_command(Command::Terminate);
-        self.thread.take().unwrap().join().unwrap();
-        unsafe {
-            Foundation::CloseHandle(self.pending_scheduled_event);
+        if self.push_command(Command::Terminate).is_ok() {
+            self.thread.take().unwrap().join().unwrap();
+            unsafe {
+                let _ = Foundation::CloseHandle(self.pending_scheduled_event);
+            }
         }
     }
 }
 
 impl StreamTrait for Stream {
     fn play(&self) -> Result<(), PlayStreamError> {
-        self.push_command(Command::PlayStream);
+        self.push_command(Command::PlayStream)
+            .map_err(|_| crate::error::PlayStreamError::DeviceNotAvailable)?;
         Ok(())
     }
     fn pause(&self) -> Result<(), PauseStreamError> {
-        self.push_command(Command::PauseStream);
+        self.push_command(Command::PauseStream)
+            .map_err(|_| crate::error::PauseStreamError::DeviceNotAvailable)?;
         Ok(())
     }
 }
@@ -183,7 +185,7 @@ impl Drop for StreamInner {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            Foundation::CloseHandle(self.event);
+            let _ = Foundation::CloseHandle(self.event);
         }
     }
 }
@@ -235,14 +237,14 @@ fn wait_for_handle_signal(handles: &[Foundation::HANDLE]) -> Result<usize, Backe
     let result = unsafe {
         Threading::WaitForMultipleObjectsEx(
             handles,
-            false,                        // Don't wait for all, just wait for the first
-            WindowsProgramming::INFINITE, // TODO: allow setting a timeout
-            false,                        // irrelevant parameter here
+            false,               // Don't wait for all, just wait for the first
+            Threading::INFINITE, // TODO: allow setting a timeout
+            false,               // irrelevant parameter here
         )
     };
     if result == Foundation::WAIT_FAILED {
         let err = unsafe { Foundation::GetLastError() };
-        let description = format!("`WaitForMultipleObjectsEx failed: {}", err.0);
+        let description = format!("`WaitForMultipleObjectsEx failed: {:?}", err);
         let err = BackendSpecificError { description };
         return Err(err);
     }
@@ -267,6 +269,8 @@ fn run_input(
     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
+    boost_current_thread_priority();
+
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             Some(ControlFlow::Break) => break,
@@ -294,6 +298,8 @@ fn run_output(
     data_callback: &mut dyn FnMut(&mut Data, &OutputCallbackInfo),
     error_callback: &mut dyn FnMut(StreamError),
 ) {
+    boost_current_thread_priority();
+
     loop {
         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
             Some(ControlFlow::Break) => break,
@@ -313,6 +319,17 @@ fn run_output(
             ControlFlow::Break => break,
             ControlFlow::Continue => continue,
         }
+    }
+}
+
+fn boost_current_thread_priority() {
+    unsafe {
+        let thread_id = Threading::GetCurrentThreadId();
+
+        let _ = Threading::SetThreadPriority(
+            HANDLE(thread_id as isize),
+            Threading::THREAD_PRIORITY_TIME_CRITICAL,
+        );
     }
 }
 

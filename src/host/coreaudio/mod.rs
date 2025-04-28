@@ -1,5 +1,4 @@
 extern crate coreaudio;
-extern crate parking_lot;
 
 use self::coreaudio::sys::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatLinearPCM,
@@ -53,8 +52,8 @@ fn asbd_from_config(
     let frames_per_packet = 1;
     let bytes_per_packet = frames_per_packet * bytes_per_frame;
     let format_flags = match sample_format {
-        SampleFormat::F32 => (kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked) as u32,
-        _ => kAudioFormatFlagIsPacked as u32,
+        SampleFormat::F32 => kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+        _ => kAudioFormatFlagIsPacked,
     };
     AudioStreamBasicDescription {
         mBitsPerChannel: bits_per_channel as _,
@@ -72,8 +71,8 @@ fn asbd_from_config(
 fn host_time_to_stream_instant(
     m_host_time: u64,
 ) -> Result<crate::StreamInstant, BackendSpecificError> {
-    let mut info: mach::mach_time::mach_timebase_info = Default::default();
-    let res = unsafe { mach::mach_time::mach_timebase_info(&mut info) };
+    let mut info: mach2::mach_time::mach_timebase_info = Default::default();
+    let res = unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
     check_os_status(res)?;
     let nanos = m_host_time * info.numer as u64 / info.denom as u64;
     let secs = nanos / 1_000_000_000;

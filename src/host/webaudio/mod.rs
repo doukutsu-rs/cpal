@@ -220,15 +220,24 @@ impl DeviceTrait for Device {
         // Create the WebAudio stream.
         let mut stream_opts = AudioContextOptions::new();
         stream_opts.sample_rate(config.sample_rate.0 as f32);
-        let ctx = Arc::new(
-            AudioContext::new_with_context_options(&stream_opts).map_err(
-                |err| -> BuildStreamError {
-                    let description = format!("{:?}", err);
-                    let err = BackendSpecificError { description };
-                    err.into()
-                },
-            )?,
-        );
+        let ctx = AudioContext::new_with_context_options(&stream_opts).map_err(
+            |err| -> BuildStreamError {
+                let description = format!("{:?}", err);
+                let err = BackendSpecificError { description };
+                err.into()
+            },
+        )?;
+
+        let destination = ctx.destination();
+
+        // If possible, set the destination's channel_count to the given config.channel.
+        // If not, fallback on the default destination channel_count to keep previous behavior
+        // and do not return an error.
+        if config.channels as u32 <= destination.max_channel_count() {
+            destination.set_channel_count(config.channels as u32);
+        }
+
+        let ctx = Arc::new(ctx);
 
         // A container for managing the lifecycle of the audio callbacks.
         let mut on_ended_closures: Vec<Arc<RwLock<Option<Closure<dyn FnMut()>>>>> = Vec::new();
@@ -247,6 +256,16 @@ impl DeviceTrait for Device {
             // A set of temporary buffers to be used for intermediate sample transformation steps.
             let mut temporary_buffer = vec![0f32; buffer_size_samples];
             let mut temporary_channel_buffer = vec![0f32; buffer_size_frames];
+
+            #[cfg(target_feature = "atomics")]
+            let temporary_channel_array_view: js_sys::Float32Array;
+            #[cfg(target_feature = "atomics")]
+            {
+                let temporary_channel_array = js_sys::ArrayBuffer::new(
+                    (std::mem::size_of::<f32>() * buffer_size_frames) as u32,
+                );
+                temporary_channel_array_view = js_sys::Float32Array::new(&temporary_channel_array);
+            }
 
             // Create a webaudio buffer which will be reused to avoid allocations.
             let ctx_buffer = ctx
@@ -307,9 +326,31 @@ impl DeviceTrait for Device {
                             temporary_channel_buffer[i] =
                                 temporary_buffer[n_channels * i + channel];
                         }
-                        ctx_buffer
-                            .copy_to_channel(&mut temporary_channel_buffer, channel as i32)
-                            .expect("Unable to write sample data into the audio context buffer");
+
+                        #[cfg(not(target_feature = "atomics"))]
+                        {
+                            ctx_buffer
+                                .copy_to_channel(&mut temporary_channel_buffer, channel as i32)
+                                .expect(
+                                    "Unable to write sample data into the audio context buffer",
+                                );
+                        }
+
+                        // copyToChannel cannot be directly copied into from a SharedArrayBuffer,
+                        // which WASM memory is backed by if the 'atomics' flag is enabled.
+                        // This workaround copies the data into an intermediary buffer first.
+                        // There's a chance browsers may eventually relax that requirement.
+                        // See this issue: https://github.com/WebAudio/web-audio-api/issues/2565
+                        #[cfg(target_feature = "atomics")]
+                        {
+                            temporary_channel_array_view.copy_from(&mut temporary_channel_buffer);
+                            ctx_buffer
+                                .unchecked_ref::<ExternalArrayAudioBuffer>()
+                                .copy_to_channel(&temporary_channel_array_view, channel as i32)
+                                .expect(
+                                    "Unable to write sample data into the audio context buffer",
+                                );
+                        }
                     }
 
                     // Create an AudioBufferSourceNode, schedule it to playback the reused buffer
@@ -470,4 +511,18 @@ fn valid_config(conf: &StreamConfig, sample_format: SampleFormat) -> bool {
 
 fn buffer_time_step_secs(buffer_size_frames: usize, sample_rate: SampleRate) -> f64 {
     buffer_size_frames as f64 / sample_rate.0 as f64
+}
+
+#[cfg(target_feature = "atomics")]
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = AudioBuffer)]
+    type ExternalArrayAudioBuffer;
+
+    # [wasm_bindgen(catch, method, structural, js_class = "AudioBuffer", js_name = copyToChannel)]
+    pub fn copy_to_channel(
+        this: &ExternalArrayAudioBuffer,
+        source: &js_sys::Float32Array,
+        channel_number: i32,
+    ) -> Result<(), JsValue>;
 }

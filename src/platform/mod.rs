@@ -55,6 +55,7 @@ macro_rules! impl_platform_host {
 
         /// The `Device` implementation associated with the platform's dynamically dispatched
         /// [`Host`] type.
+        #[derive(Clone)]
         pub struct Device(DeviceInner);
 
         /// The `Devices` iterator associated with the platform's dynamically dispatched [`Host`]
@@ -68,6 +69,7 @@ macro_rules! impl_platform_host {
         // functions within the callback.
         //
         // TODO: Confirm this and add more specific detail and references.
+        #[must_use = "If the stream is not stored it will not play."]
         pub struct Stream(StreamInner, crate::platform::NotSendSyncAcrossAllPlatforms);
 
         /// The `SupportedInputConfigs` iterator associated with the platform's dynamically
@@ -88,6 +90,7 @@ macro_rules! impl_platform_host {
         }
 
         /// Contains a platform specific [`Device`] implementation.
+        #[derive(Clone)]
         pub enum DeviceInner {
             $(
                 $(#[cfg($feat)])?
@@ -308,6 +311,24 @@ macro_rules! impl_platform_host {
                     $(
                         $(#[cfg($feat)])?
                         DeviceInner::$HostVariant(ref d) => d.name(),
+                    )*
+                }
+            }
+
+            fn supports_input(&self) -> bool {
+                match self.0 {
+                    $(
+                        $(#[cfg($feat)])?
+                        DeviceInner::$HostVariant(ref d) => d.supports_input(),
+                    )*
+                }
+            }
+
+            fn supports_output(&self) -> bool {
+                match self.0 {
+                    $(
+                        $(#[cfg($feat)])?
+                        DeviceInner::$HostVariant(ref d) => d.supports_output(),
                     )*
                 }
             }
