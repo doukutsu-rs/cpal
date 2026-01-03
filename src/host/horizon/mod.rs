@@ -17,6 +17,7 @@ use crate::{
     SupportedStreamConfigsError,
 };
 
+#[derive(Clone)]
 pub struct Device;
 
 pub struct Host;
